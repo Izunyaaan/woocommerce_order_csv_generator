@@ -49,13 +49,12 @@ const WC_QUERY_STRING_AUTH =
 
 const PER_PAGE = 100;
 
-// If deployed behind something like nginx, Render, Railway, etc.
 if (IS_PRODUCTION) {
     app.set("trust proxy", 1);
 }
 
 // ---------------------------------------------------------
-// Middleware
+// Security / middleware
 // ---------------------------------------------------------
 
 app.use(
@@ -63,11 +62,15 @@ app.use(
         contentSecurityPolicy: {
             directives: {
                 defaultSrc: ["'self'"],
+                scriptSrc: ["'self'"],
                 styleSrc: ["'self'", "'unsafe-inline'"],
+                mediaSrc: ["'self'"],
             },
         },
     })
 );
+
+app.use(express.static("public"));
 
 app.use(
     session({
@@ -80,8 +83,6 @@ app.use(
             httpOnly: true,
             secure: IS_PRODUCTION,
             sameSite: "lax",
-
-            // 8 hours
             maxAge: 8 * 60 * 60 * 1000,
         },
     })
@@ -100,8 +101,6 @@ passport.use(
             clientID: process.env.GOOGLE_CLIENT_ID,
             clientSecret: process.env.GOOGLE_CLIENT_SECRET,
             callbackURL: process.env.GOOGLE_CALLBACK_URL,
-
-            // We need email for the whitelist
             scope: ["profile", "email"],
         },
 
@@ -124,15 +123,11 @@ passport.use(
                     return done(null, false);
                 }
 
-                // No database needed.
-                // Only store what we actually need.
-                const user = {
+                return done(null, {
                     id: profile.id,
                     email,
                     displayName: profile.displayName || email,
-                };
-
-                return done(null, user);
+                });
             } catch (error) {
                 return done(error);
             }
@@ -159,10 +154,27 @@ function requireLogin(req, res, next) {
 
     const email = req.user?.email?.toLowerCase();
 
-    // Defense in depth:
-    // check whitelist again on every protected request.
     if (!email || !ALLOWED_EMAILS.has(email)) {
         return res.status(403).send("Access denied.");
+    }
+
+    next();
+}
+
+// Used by fetch() routes so we don't redirect to HTML
+function requireApiLogin(req, res, next) {
+    if (!req.isAuthenticated()) {
+        return res.status(401).json({
+            error: "Not authenticated",
+        });
+    }
+
+    const email = req.user?.email?.toLowerCase();
+
+    if (!email || !ALLOWED_EMAILS.has(email)) {
+        return res.status(403).json({
+            error: "Access denied",
+        });
     }
 
     next();
@@ -271,7 +283,6 @@ async function fetchOrdersPage(page, after, before) {
         after: after.toISOString(),
         before: before.toISOString(),
         dates_are_gmt: "true",
-
         status: "any",
 
         page: String(page),
@@ -283,13 +294,6 @@ async function fetchOrdersPage(page, after, before) {
 
     const headers = {};
 
-    /*
-     * Your earlier WordPress setup appears to have trouble
-     * with Authorization headers.
-     *
-     * WooCommerce officially supports query-string auth
-     * over HTTPS as a fallback.
-     */
     if (WC_QUERY_STRING_AUTH) {
         params.set("consumer_key", WC_CONSUMER_KEY);
         params.set("consumer_secret", WC_CONSUMER_SECRET);
@@ -348,18 +352,13 @@ async function generateOrdersCsv() {
         before
     );
 
-    console.log(
-        `Orders: ${firstPage.totalOrders}`
-    );
-
-    console.log(
-        `Pages: ${firstPage.totalPages}`
-    );
+    console.log(`Orders: ${firstPage.totalOrders}`);
+    console.log(`Pages: ${firstPage.totalPages}`);
 
     const allOrders = [...firstPage.orders];
 
     console.log(
-        `Fetched 1/${firstPage.totalPages}`
+        `Fetched page 1/${firstPage.totalPages}`
     );
 
     for (
@@ -376,7 +375,7 @@ async function generateOrdersCsv() {
         allOrders.push(...result.orders);
 
         console.log(
-            `Fetched ${page}/${firstPage.totalPages}`
+            `Fetched page ${page}/${firstPage.totalPages}`
         );
     }
 
@@ -457,7 +456,6 @@ function page(content) {
       max-width: 520px;
 
       background: white;
-
       padding: 32px;
 
       border-radius: 16px;
@@ -494,6 +492,11 @@ function page(content) {
       cursor: pointer;
     }
 
+    .button:disabled {
+      opacity: 0.55;
+      cursor: wait;
+    }
+
     .secondary {
       background: #eee;
       color: #222;
@@ -515,6 +518,17 @@ function page(content) {
 
       background: #ffe9e9;
       color: #8b0000;
+    }
+
+    .success {
+      margin-top: 18px;
+      color: #18794e;
+      font-weight: 600;
+    }
+
+    .status {
+      margin-top: 18px;
+      min-height: 24px;
     }
 
     form {
@@ -593,12 +607,13 @@ app.get("/", (req, res) => {
 
       <div class="actions">
 
-        <a
+        <button
           class="button"
-          href="/export"
+          id="exportButton"
+          type="button"
         >
           Export CSV
-        </a>
+        </button>
 
         <form
           method="POST"
@@ -613,18 +628,28 @@ app.get("/", (req, res) => {
         </form>
 
       </div>
+
+      <div
+        id="exportStatus"
+        class="status muted"
+      ></div>
+
+      <audio
+        id="doneSound"
+        preload="auto"
+        src="/sounds/done.mp3"
+      ></audio>
+
+      <script src="/js/export.js"></script>
     `)
     );
 });
 
-// Send user to Google
 app.get(
     "/auth/google",
-
     passport.authenticate("google")
 );
 
-// Google sends user back here
 app.get(
     "/auth/google/callback",
 
@@ -637,10 +662,13 @@ app.get(
     }
 );
 
-// Protected CSV export
+// ---------------------------------------------------------
+// Protected export
+// ---------------------------------------------------------
+
 app.get(
     "/export",
-    requireLogin,
+    requireApiLogin,
 
     async (req, res) => {
         try {
@@ -679,10 +707,7 @@ app.get(
                 "no-store"
             );
 
-            /*
-             * BOM helps Excel recognize UTF-8 correctly,
-             * especially for customer/product names.
-             */
+            // Makes UTF-8 friendlier for Excel
             res.send("\uFEFF" + result.csv);
 
             console.log(
@@ -692,34 +717,17 @@ app.get(
             console.error("Export failed:");
             console.error(error);
 
-            res.status(500).send(
-                page(`
-          <h1>Export failed</h1>
-
-          <p>
-            The WooCommerce export could not
-            be completed.
-          </p>
-
-          <p class="muted">
-            Check the server logs for details.
-          </p>
-
-          <div class="actions">
-            <a
-              class="button"
-              href="/"
-            >
-              Back
-            </a>
-          </div>
-        `)
-            );
+            res.status(500).json({
+                error: "The WooCommerce export could not be completed.",
+            });
         }
     }
 );
 
+// ---------------------------------------------------------
 // Logout
+// ---------------------------------------------------------
+
 app.post(
     "/logout",
     requireLogin,
@@ -741,7 +749,10 @@ app.post(
     }
 );
 
-// Very simple health endpoint
+// ---------------------------------------------------------
+// Health
+// ---------------------------------------------------------
+
 app.get("/health", (req, res) => {
     res.json({
         status: "ok",
