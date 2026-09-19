@@ -1,0 +1,25 @@
+{
+  "name": "woocommerce_order_csv_generator",
+  "version": "1.0.0",
+  "description": "A small tool to export a csv of woocommerce order over the past 24 months",
+  "keywords": [
+    "WooCommerce",
+    "AI",
+    "Data"
+  ],
+  "license": "ISC",
+  "author": "Izunyan",
+  "type": "commonjs",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.1",
+    "express": "^5.2.1",
+    "express-session": "^1.19.0",
+    "helmet": "^8.3.0",
+    "passport": "^0.7.0",
+    "passport-google-oidc": "^0.1.0"
+  }
+}
